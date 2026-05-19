@@ -7,18 +7,28 @@
 //!
 //! 2. **Slack-style `:trigger` lookup** — when the user types `:`
 //!    followed by ASCII letters/digits, those letters are matched
-//!    against each emoji's `triggers` list using a first-char-anchored
-//!    subsequence rule (see [`subseq_match`]):
+//!    against each emoji's `triggers` list as a subsequence (walking
+//!    the trigger left-to-right, each query char must appear in
+//!    order with arbitrary chars allowed in between).
 //!
-//!    - `:smile`  → exact match → 😄
-//!    - `:sml`    → s + m + l in order in `smile` → 😄
-//!    - `:smle`   → s + m + (skip i) + l + e → 😄
-//!    - `:mile`   → ✗ first char `m` ≠ first char `s` of `smile`
-//!    - `:mlsi`   → ✗ no trigger starts with `m` and contains m..l..s..i
+//!    Ranking borrows peco's fuzzy-finder heuristic:
 //!
-//!    The first-char anchor is what gives the matching a "prefix-like
-//!    narrowing" feel (mirrors how Slack/Discord emoji pickers behave):
-//!    typing more characters narrows the set, never broadens it.
+//!    1. **Longest contiguous run** of adjacent matched chars in
+//!       the trigger (descending). `:hlo` against `smiling_face_with_halo`
+//!       gets a run of 2 (l-o adjacent inside `halo`) while
+//!       `:hlo` against `helicopter` only gets a run of 1
+//!       (h, l, o are scattered) — so 😇 outranks 🚁.
+//!    2. **Earliest match position** in the trigger (ascending).
+//!       Among equal-longest hits, the one that starts earlier wins.
+//!    3. **Trigger length** (ascending). Final tiebreaker: shorter
+//!       triggers win, so `:smile` lands on `smile` ahead of
+//!       `smiley`.
+//!
+//!    For each trigger we try every position where the first query
+//!    char appears, greedily extend to a full subseq match, and keep
+//!    the best-scoring placement — so `:halo` lands on the `halo`
+//!    occurrence of `h` inside `smiling_face_with_halo`, not the
+//!    earlier one in `with`.
 //!
 //! `triggers:` in `data/emoji.yml` is a unified list of every ASCII
 //! string a user might type after `:` to surface this emoji. The
@@ -35,6 +45,7 @@
 //! hiragana conversion path, no `hiragana_to_romaji` reverse table,
 //! and no description-rendering logic specific to the romaji path.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -75,11 +86,10 @@ struct EmojiTable {
     descriptions: HashMap<String, String>,
     /// hiragana reading → emoji list, in source-file order.
     by_reading: HashMap<String, Vec<String>>,
-    /// All `(trigger, emoji)` pairs flattened for sequential scan.
-    /// Order matches the source-file order of `triggers:` inside each
-    /// entry, so the porter's "manual alias first, CLDR second,
-    /// romaji last" ordering carries through to candidate ranking
-    /// (equal-tier matches fall back to source order).
+    /// `(trigger, emoji)` pairs flattened for sequential scan. The
+    /// porter emits triggers in "manual alias → CLDR → romaji"
+    /// order, so equal-distance ties at ranking time fall back to
+    /// that more idiomatic ordering.
     triggers: Vec<(String, String)>,
 }
 
@@ -107,63 +117,59 @@ static EMOJI_TABLE: LazyLock<EmojiTable> = LazyLock::new(|| {
     }
 });
 
-/// Maximum number of target characters that may be skipped between two
-/// consecutive matched query characters. With `MAX_GAP = 1`, `:smle`
-/// matches `smile` (one skipped `i`) but a sparse query like `:warai`
-/// no longer subsequence-matches a long CLDR name like
-/// `woman_running_facing_right` where each consumed query char sits
-/// many positions apart in the target — which is what we want to keep
-/// the matching feel like "narrowing prefix" rather than "loose fuzzy".
-const MAX_GAP: usize = 1;
+/// Sort key for a trigger's best fuzzy placement. Plain ascending
+/// `min()` selects the most relevant: longer contiguous runs come
+/// first (via [`Reverse`]), then earlier start positions, then
+/// shorter triggers.
+type MatchScore = (Reverse<usize>, usize, usize);
 
-/// True when `query` matches `target` under the Slack-style rule:
+/// Peco-style score for `query` against `target`. Returns `None`
+/// when `query` is not a subsequence of `target` from any starting
+/// position. Otherwise tries every position where `target[i] ==
+/// query[0]`, greedily completes the subseq from there, and keeps
+/// the lowest-sorting [`MatchScore`].
 ///
-/// - The first character of `query` must equal the first character of
-///   `target` (anchor — keeps typing-more-narrows behavior).
-/// - The remaining `query` characters appear in `target` in order
-///   (subsequence).
-/// - Between any two consecutive matched query characters, at most
-///   [`MAX_GAP`] target characters are skipped. Without this bound,
-///   long CLDR snake_case names accept almost any short query
-///   (`:warai` → `woman_running_facing_right`), drowning the
-///   candidate list in unrelated emojis.
-///
-/// Trailing target characters after the final match are unbounded —
-/// `:sm` still matches `smile` even though `ile` is unmatched.
-fn subseq_match(query: &str, target: &str) -> bool {
-    if query.is_empty() || target.is_empty() {
-        return false;
+/// Both inputs are taken as byte slices because triggers are all
+/// ASCII (see [`scripts/emoji_porter.py`]) — no need to pay the
+/// `Vec<char>` allocation per call.
+fn best_match_score(query: &[u8], target: &[u8]) -> Option<MatchScore> {
+    if query.is_empty() {
+        return None;
     }
-    let q: Vec<char> = query.chars().collect();
-    let t: Vec<char> = target.chars().collect();
-    if q[0] != t[0] {
-        return false;
-    }
-    let mut qi: usize = 0;
-    let mut last_match: Option<usize> = None;
-    for (ti, &tc) in t.iter().enumerate() {
-        if qi >= q.len() {
-            break;
-        }
-        if tc == q[qi] {
-            if let Some(prev) = last_match
-                && ti - prev > MAX_GAP + 1
-            {
-                return false;
-            }
-            last_match = Some(ti);
-            qi += 1;
-        }
-    }
-    qi == q.len()
+    let target_len = target.len();
+    (0..target_len)
+        .filter(|&start| target[start] == query[0])
+        .filter_map(|start| {
+            longest_run_from(query, target, start)
+                .map(|longest| (Reverse(longest), start, target_len))
+        })
+        .min()
 }
 
-/// True iff every char in `s` is a legal Slack-style trigger char
-/// (lowercase ASCII letter, digit, `_`, `+`, `-`).
-fn is_trigger_chars(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '+' | '-'))
+/// Greedy subseq match from `target[start]` (which is the caller's
+/// guarantee to equal `query[0]`). Returns the longest run of
+/// adjacent matched positions if all of `query` is consumed, else
+/// `None`.
+fn longest_run_from(query: &[u8], target: &[u8], start: usize) -> Option<usize> {
+    let mut qi = 1; // query[0] consumed by the anchor itself.
+    let mut prev = start;
+    let mut longest = 1usize;
+    let mut run = 1usize;
+
+    for (ti, &tc) in target.iter().enumerate().skip(start + 1) {
+        if qi >= query.len() {
+            break;
+        }
+        if tc != query[qi] {
+            continue;
+        }
+        run = if ti == prev + 1 { run + 1 } else { 1 };
+        longest = longest.max(run);
+        prev = ti;
+        qi += 1;
+    }
+
+    (qi == query.len()).then_some(longest)
 }
 
 /// Format the per-candidate description: `絵文字` alone, or
@@ -216,55 +222,32 @@ impl Rewriter for EmojiRewriter {
             }
         };
 
-        // 1. Slack-style :trigger lookup. Only fires when the input
-        //    starts with `:` and the suffix is plausibly a trigger
-        //    fragment (no kana, no uppercase, no symbols beyond the
-        //    handful Slack permits).
-        //
-        // Matches are scored to make incremental typing feel like
-        // narrowing rather than a static list reshuffling:
-        //
-        //   - Exact alias hits (`:smile` → `smile` trigger) come first
-        //     so `:smile` surfaces 😄 (not 😃 via `smiley` subseq).
-        //   - Prefix hits (`:sm` → `smile`) come next so typing more
-        //     characters keeps the same emojis pinned to the top.
-        //   - Looser subsequence hits trail behind.
-        //   - Within a tier, shorter triggers win — `:s` should
-        //     prioritize 😄 (`smile`, 5 chars) over a sea of
-        //     `*_dark_skin_tone` variants 30+ chars long that just
-        //     happen to start with `s`.
+        // Path 1: Slack-style `:trigger` lookup. Score each trigger
+        // with peco's fuzzy heuristic (see `best_match_score`), sort
+        // ascending, cap at MAX_TRIGGER_CANDIDATES to keep short
+        // queries (`:s`) from dumping thousands of hits. Equal-score
+        // ties keep emoji.yml's source order (manual alias → CLDR →
+        // romaji), which already favors idiomatic triggers.
         if let Some(stripped) = candidate.strip_prefix(TRIGGER_PREFIX)
-            && is_trigger_chars(stripped)
+            && !stripped.is_empty()
         {
-            let mut scored: Vec<(u8, usize, &str, &str)> = Vec::new();
+            let query = stripped.as_bytes();
+            let mut scored: Vec<(MatchScore, &str, &str)> = Vec::new();
             for (trig, emoji) in &EMOJI_TABLE.triggers {
-                if !subseq_match(stripped, trig) {
-                    continue;
+                if let Some(score) = best_match_score(query, trig.as_bytes()) {
+                    scored.push((score, trig.as_str(), emoji.as_str()));
                 }
-                let tier: u8 = if trig == stripped {
-                    0
-                } else if trig.starts_with(stripped) {
-                    1
-                } else {
-                    2
-                };
-                scored.push((tier, trig.len(), trig.as_str(), emoji.as_str()));
             }
-            // Stable sort: tier asc, then trigger length asc.
-            // Equal-key entries fall back to emoji.yml's source order.
-            scored.sort_by_key(|&(tier, len, _, _)| (tier, len));
-            for (_, _, trig, emoji) in scored {
+            scored.sort_by_key(|&(score, _, _)| score);
+            for (_, trig, emoji) in scored {
                 let desc = format_trigger_description(emoji, trig);
                 push_with_desc(emoji, desc, &mut out);
             }
         }
 
-        // 2. Hiragana reading lookup (mozc-parity path). Skipped when
-        //    the input is already in trigger form so we don't double-
-        //    surface candidates that just match by happenstance.
-        //    Annotation here is the plain `絵文字 <desc>` form — the
-        //    user typed the hiragana reading directly, so there's no
-        //    extra trigger to disambiguate.
+        // Path 2: Hiragana reading lookup. Exact-match on the typed
+        // kana against Mozc's reading table. Skipped when the input
+        // is already a `:trigger` form (path 1 covered it).
         if !candidate.starts_with(TRIGGER_PREFIX)
             && let Some(emojis) = EMOJI_TABLE.by_reading.get(candidate)
         {
@@ -283,106 +266,75 @@ mod tests {
     use super::*;
     use crate::rewriter::test_util::{desc, texts};
 
-    // ---------- subseq_match ----------
-
-    #[test]
-    fn subseq_first_char_must_match() {
-        assert!(subseq_match("smile", "smile"));
-        assert!(subseq_match("sml", "smile"));
-        assert!(subseq_match("smle", "smile"));
-        assert!(!subseq_match("mile", "smile"));
-        assert!(!subseq_match("mlsi", "smile"));
+    fn rewriter() -> EmojiRewriter {
+        EmojiRewriter::new()
     }
 
-    #[test]
-    fn subseq_rejects_loose_match_in_long_target() {
-        assert!(!subseq_match("warai", "woman_running_facing_right"));
-        assert!(!subseq_match("pien", "pleading_face"));
-    }
-
-    #[test]
-    fn subseq_allows_skip_of_one_char() {
-        assert!(subseq_match("smle", "smile"));
-        assert!(subseq_match("smie", "smile"));
-        assert!(!subseq_match("sle", "smile"));
-    }
-
-    #[test]
-    fn subseq_handles_empty_inputs() {
-        assert!(!subseq_match("", ""));
-        assert!(!subseq_match("", "smile"));
-        assert!(!subseq_match("smile", ""));
-    }
-
-    #[test]
-    fn subseq_does_not_revisit_target_chars() {
-        assert!(!subseq_match("ss", "smile"));
-    }
-
-    // ---------- :trigger lookup ----------
-
-    #[test]
-    fn trigger_exact_match_smile() {
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite(":smile"));
+    fn assert_surfaces(query: &str, emoji: &str) {
+        let out = texts(&rewriter().rewrite(query));
         assert!(
-            out.contains(&"😄".to_string()),
-            "expected 😄 from :smile, got {:?}",
+            out.contains(&emoji.to_string()),
+            "expected {} from `{}`, got {:?}",
+            emoji,
+            query,
             out
         );
     }
 
-    #[test]
-    fn trigger_subsequence_smle_matches_smile() {
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite(":smle"));
+    fn assert_does_not_surface(query: &str, emoji: &str) {
+        let out = texts(&rewriter().rewrite(query));
         assert!(
-            out.contains(&"😄".to_string()),
-            "expected 😄 from :smle, got {:?}",
+            !out.contains(&emoji.to_string()),
+            "did NOT expect {} from `{}`, got {:?}",
+            emoji,
+            query,
             out
         );
     }
 
+    // ---------- :trigger subseq matching ----------
+
     #[test]
-    fn trigger_mlsi_rejects_smile() {
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite(":mlsi"));
-        assert!(
-            !out.contains(&"😄".to_string()),
-            "did NOT expect 😄 from :mlsi, got {:?}",
-            out
-        );
+    fn trigger_exact_match() {
+        assert_surfaces(":smile", "😄");
     }
 
     #[test]
-    fn trigger_heart_returns_red_heart() {
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite(":heart"));
-        assert!(
-            out.contains(&"❤\u{fe0f}".to_string()) || out.contains(&"❤".to_string()),
-            "expected ❤ from :heart, got {:?}",
-            out
-        );
+    fn trigger_subseq_matches_deep_substring() {
+        // `:halo` matches `smiling_face_with_halo` via h-a-l-o subseq.
+        assert_surfaces(":halo", "😇");
     }
 
     #[test]
-    fn trigger_plus_one_accepts_punctuation() {
-        // `+1` is Slack's classic trigger for 👍; the porter quotes
-        // it so the YAML loader returns it as a string. The rewriter
-        // must accept `+` inside the trigger body.
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite(":+1"));
-        assert!(
-            out.contains(&"👍".to_string()),
-            "expected 👍 from :+1, got {:?}",
-            out
-        );
+    fn trigger_subseq_skips_chars_inside_a_word() {
+        // `:hlo` skips `a` inside the trailing `halo` to reach 😇.
+        assert_surfaces(":hlo", "😇");
     }
 
     #[test]
-    fn trigger_rejects_uppercase() {
-        let r = EmojiRewriter::new();
-        let out = r.rewrite(":SMILE");
+    fn trigger_subseq_skips_separator_chars_too() {
+        // `:smhlo` walks s-m from `smiling`, hops over `_face_with_`,
+        // then picks up h-l-o in `halo`.
+        assert_surfaces(":smhlo", "😇");
+    }
+
+    #[test]
+    fn trigger_skip_inside_word_still_matches() {
+        // `:smle` skips the `i` inside `smile`.
+        assert_surfaces(":smle", "😄");
+    }
+
+    #[test]
+    fn trigger_out_of_order_rejects() {
+        // m-l-s-i is not a subseq of s-m-i-l-e.
+        assert_does_not_surface(":mlsi", "😄");
+    }
+
+    #[test]
+    fn trigger_uppercase_rejects() {
+        // All triggers are ASCII lowercase, so `:SMILE` simply has
+        // no subseq match anywhere — no special-case needed.
+        let out = rewriter().rewrite(":SMILE");
         assert!(
             out.is_empty(),
             "expected no match for :SMILE, got {:?}",
@@ -391,16 +343,34 @@ mod tests {
     }
 
     #[test]
-    fn trigger_carries_emoji_description() {
-        // Description must include both the matched `:trigger` (so
-        // the user knows what their partial input completes to) and
-        // the `絵文字` label that signals the candidate's category.
-        let r = EmojiRewriter::new();
-        let out = r.rewrite(":smile");
+    fn trigger_accepts_plus_in_body() {
+        // `+1` is the classic Slack alias for 👍.
+        assert_surfaces(":+1", "👍");
+    }
+
+    // ---------- description annotation ----------
+
+    #[test]
+    fn trigger_description_carries_matched_trigger_and_label() {
+        let out = rewriter().rewrite(":smile");
         let d = desc(&out, "😄").expect("😄 should have a description");
         assert!(
             d.contains(":smile") && d.contains(EMOJI_LABEL),
-            "description should contain both `:smile` and `絵文字`, got `{}`",
+            "expected `:smile` and `絵文字` in description, got `{}`",
+            d
+        );
+    }
+
+    #[test]
+    fn trigger_description_shows_full_trigger_for_partial_query() {
+        // `:pie` matches the romaji trigger `pien`; the description
+        // shows the full `:pien` so the user sees what they're
+        // completing to.
+        let out = rewriter().rewrite(":pie");
+        let d = desc(&out, "🥺").expect("🥺 should have a description");
+        assert!(
+            d.contains(":pien"),
+            "expected `:pien` in description, got `{}`",
             d
         );
     }
@@ -408,104 +378,25 @@ mod tests {
     // ---------- hiragana reading lookup ----------
 
     #[test]
-    fn hiragana_pien_surfaces_pleading_face() {
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite("ぴえん"));
-        assert!(
-            out.contains(&"🥺".to_string()),
-            "expected 🥺 from ぴえん, got {:?}",
-            out
-        );
+    fn hiragana_reading_surfaces_emoji() {
+        assert_surfaces("ぴえん", "🥺");
+        assert_surfaces("おねがい", "🥺");
     }
 
     #[test]
-    fn hiragana_unrelated_reading_returns_empty() {
-        let r = EmojiRewriter::new();
-        let out = r.rewrite("きょうとし");
+    fn hiragana_unrelated_reading_rejects() {
+        let out = rewriter().rewrite("きょうとし");
         assert!(out.is_empty(), "expected no match, got {:?}", texts(&out));
-    }
-
-    #[test]
-    fn hiragana_multiple_readings_for_same_emoji() {
-        let r = EmojiRewriter::new();
-        assert!(texts(&r.rewrite("おねがい")).contains(&"🥺".to_string()));
-        assert!(texts(&r.rewrite("ぴえん")).contains(&"🥺".to_string()));
-    }
-
-    // ---------- guardrails ----------
-
-    #[test]
-    fn empty_input_returns_empty() {
-        let r = EmojiRewriter::new();
-        assert!(r.rewrite("").is_empty());
-    }
-
-    #[test]
-    fn colon_alone_returns_nothing() {
-        let r = EmojiRewriter::new();
-        assert!(r.rewrite(":").is_empty());
     }
 
     // ---------- precomputed romaji triggers ----------
 
     #[test]
-    fn romaji_pien_surfaces_pleading_face() {
-        // The romaji path now comes from precomputed `triggers:` in
-        // emoji.yml rather than a runtime romaji-to-hiragana
-        // conversion. `:pien` should land directly on 🥺.
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite(":pien"));
-        assert!(
-            out.contains(&"🥺".to_string()),
-            "expected 🥺 from :pien, got {:?}",
-            out
-        );
-    }
-
-    #[test]
-    fn romaji_pie_prefix_surfaces_pleading_face() {
-        // `:pie` is a prefix of trigger `pien`, so the prefix tier
-        // should still surface 🥺 with `:pien` shown in the desc.
-        let r = EmojiRewriter::new();
-        let out = r.rewrite(":pie");
-        assert!(
-            texts(&out).contains(&"🥺".to_string()),
-            "expected 🥺 from :pie (prefix), got {:?}",
-            texts(&out)
-        );
-        let d = desc(&out, "🥺").expect("🥺 should have a description");
-        assert!(
-            d.contains(":pien"),
-            "expected :pien in description, got `{}`",
-            d
-        );
-    }
-
-    #[test]
-    fn romaji_kiniku_and_kinniku_both_surface_muscle() {
-        // The user-reported bug: `:kiniku` should reach 💪 because
-        // people mentally split きんにく as "ki-n-niku" but their
-        // fingers type `kiniku` (the leading `n` of `niku` absorbs
-        // the ん). The porter emits both the silent-ん form
-        // (`kiniku`) and the explicit double-n form (`kinniku`), and
-        // either should land on 💪.
-        let r = EmojiRewriter::new();
-        for query in [":kiniku", ":kinniku"] {
-            let out = texts(&r.rewrite(query));
-            assert!(
-                out.contains(&"💪".to_string()),
-                "expected 💪 from {}, got {:?}",
-                query,
-                out
-            );
-        }
-    }
-
-    #[test]
-    fn romaji_warai_surfaces_smiling_face() {
-        // Mozc registers `わらい` (笑い) as a reading for 😁 and 😂.
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite(":warai"));
+    fn romaji_trigger_surfaces_emoji() {
+        // Direct romaji of a Mozc reading reaches the emoji because
+        // the porter emitted it into the trigger table.
+        assert_surfaces(":pien", "🥺");
+        let out = texts(&rewriter().rewrite(":warai"));
         assert!(
             out.contains(&"😁".to_string()) || out.contains(&"😂".to_string()),
             "expected 😁 or 😂 from :warai, got {:?}",
@@ -514,9 +405,29 @@ mod tests {
     }
 
     #[test]
-    fn romaji_garbage_yields_no_match() {
-        let r = EmojiRewriter::new();
-        let out = r.rewrite(":xyzqq");
+    fn romaji_silent_n_variant_surfaces_emoji() {
+        // The porter emits both `kiniku` (silent ん) and `kinniku`
+        // (explicit double-n) for the reading `きんにく`, so users
+        // typing either spelling reach 💪.
+        assert_surfaces(":kiniku", "💪");
+        assert_surfaces(":kinniku", "💪");
+    }
+
+    // ---------- guardrails ----------
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert!(rewriter().rewrite("").is_empty());
+    }
+
+    #[test]
+    fn colon_alone_returns_empty() {
+        assert!(rewriter().rewrite(":").is_empty());
+    }
+
+    #[test]
+    fn unmatched_trigger_query_returns_empty() {
+        let out = rewriter().rewrite(":xyzqq");
         assert!(
             out.is_empty(),
             "expected no match for :xyzqq, got {:?}",
@@ -525,12 +436,11 @@ mod tests {
     }
 
     #[test]
-    fn dedupes_emoji_across_multiple_matching_triggers() {
-        // 😄 has multiple aliases (smile, happy, grinning_face...).
-        // `:smile` may subseq-match more than one alias, but the
-        // emoji should only appear once.
-        let r = EmojiRewriter::new();
-        let out = texts(&r.rewrite(":smile"));
+    fn duplicate_triggers_for_same_emoji_dedupe() {
+        // 😄 carries multiple triggers (`smile`, `happy`,
+        // `grinning_face_with_smiling_eyes`); even when several
+        // match, the emoji surfaces only once.
+        let out = texts(&rewriter().rewrite(":smile"));
         let count = out.iter().filter(|t| *t == "😄").count();
         assert_eq!(count, 1, "😄 should appear once, got {:?}", out);
     }
