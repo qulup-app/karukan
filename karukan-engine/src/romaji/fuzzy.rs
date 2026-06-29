@@ -149,6 +149,44 @@ pub fn generate_hypotheses(buffer: &str, max_hypotheses: usize) -> Vec<FuzzyHypo
             continue;
         }
 
+        // --- Boundary transposition (highest priority): the kana immediately
+        // before the ASCII segment may be part of a transposed romaji pair
+        // (e.g. "うs" = typed "us" instead of "su" → す). This is the most
+        // common pattern for kana+ASCII typos so it runs first.
+        if seg_start > 0 {
+            let prev_char = chars[seg_start - 1];
+            if is_kana(prev_char) {
+                let seg_str: String = seg_chars.iter().collect();
+                'romaji_variant: for prev_romaji in all_romaji_for_kana(prev_char) {
+                    let combined: String = format!("{}{}", prev_romaji, seg_str);
+                    let combined_chars: Vec<char> = combined.chars().collect();
+                    if combined_chars.len() < 2 || combined_chars.len() > 6 {
+                        continue;
+                    }
+                    for swap_pos in 0..combined_chars.len() - 1 {
+                        let mut candidate = combined_chars.clone();
+                        candidate.swap(swap_pos, swap_pos + 1);
+                        let candidate_str: String = candidate.iter().collect();
+                        if let Some(kana) = validate_romaji_segment(&candidate_str) {
+                            let full = rebuild(&chars, seg_start - 1, 1 + seg_len, &kana);
+                            if !add(
+                                full,
+                                EditType::Transposition,
+                                &mut seen,
+                                &mut hypotheses,
+                            ) {
+                                break 'romaji_variant;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if hypotheses.len() >= max_hypotheses {
+            break;
+        }
+
         // --- Insertion: insert a vowel after each character in the segment ---
         'insertion: for insert_pos in 0..=seg_chars.len() {
             for &vowel in &VOWELS {
@@ -212,7 +250,7 @@ pub fn generate_hypotheses(buffer: &str, max_hypotheses: usize) -> Vec<FuzzyHypo
             break;
         }
 
-        // --- Transposition: swap adjacent pairs ---
+        // --- Transposition: swap adjacent pairs within the segment ---
         if seg_chars.len() >= 2 {
             'transposition: for swap_pos in 0..seg_chars.len() - 1 {
                 let mut candidate = seg_chars.clone();
@@ -225,6 +263,10 @@ pub fn generate_hypotheses(buffer: &str, max_hypotheses: usize) -> Vec<FuzzyHypo
                     }
                 }
             }
+        }
+
+        if hypotheses.len() >= max_hypotheses {
+            break;
         }
 
         if hypotheses.len() >= max_hypotheses {
@@ -244,6 +286,36 @@ pub fn generate_hypotheses(buffer: &str, max_hypotheses: usize) -> Vec<FuzzyHypo
 /// Returns an empty string for characters that are not hiragana
 /// (katakana, kanji, symbols, digits, ASCII), which are passed through
 /// unchanged by `reverse_romaji`.
+/// All possible romaji representations for a single kana, drawn from the
+/// conversion rules. Used by boundary transposition to try alternative
+/// reverse mappings (e.g. か → ["ka", "ca"]).
+fn all_romaji_for_kana(c: char) -> &'static [&'static str] {
+    match c {
+        'あ' => &["a"],  'い' => &["i"],  'う' => &["u"],  'え' => &["e"],  'お' => &["o"],
+        'か' => &["ka", "ca"], 'き' => &["ki"], 'く' => &["ku", "cu", "qu"],
+        'け' => &["ke"], 'こ' => &["ko", "co"],
+        'さ' => &["sa"], 'し' => &["si", "shi", "ci"], 'す' => &["su"],
+        'せ' => &["se", "ce"], 'そ' => &["so"],
+        'た' => &["ta"], 'ち' => &["ti", "chi"], 'つ' => &["tu", "tsu"],
+        'て' => &["te"], 'と' => &["to"],
+        'な' => &["na"], 'に' => &["ni"], 'ぬ' => &["nu"], 'ね' => &["ne"], 'の' => &["no"],
+        'は' => &["ha"], 'ひ' => &["hi"], 'ふ' => &["hu", "fu"],
+        'へ' => &["he"], 'ほ' => &["ho"],
+        'ま' => &["ma"], 'み' => &["mi"], 'む' => &["mu"], 'め' => &["me"], 'も' => &["mo"],
+        'や' => &["ya"], 'ゆ' => &["yu"], 'よ' => &["yo"],
+        'ら' => &["ra"], 'り' => &["ri"], 'る' => &["ru"], 'れ' => &["re"], 'ろ' => &["ro"],
+        'わ' => &["wa"], 'を' => &["wo"], 'ん' => &["nn"],
+        'が' => &["ga"], 'ぎ' => &["gi"], 'ぐ' => &["gu"], 'げ' => &["ge"], 'ご' => &["go"],
+        'ざ' => &["za"], 'じ' => &["zi", "ji"], 'ず' => &["zu"],
+        'ぜ' => &["ze"], 'ぞ' => &["zo"],
+        'だ' => &["da"], 'ぢ' => &["di"], 'づ' => &["du"], 'で' => &["de"], 'ど' => &["do"],
+        'ば' => &["ba"], 'び' => &["bi"], 'ぶ' => &["bu"], 'べ' => &["be"], 'ぼ' => &["bo"],
+        'ぱ' => &["pa"], 'ぴ' => &["pi"], 'ぷ' => &["pu"], 'ぺ' => &["pe"], 'ぽ' => &["po"],
+        _ => &[],
+    }
+}
+
+/// Primary (shortest) romaji for a single kana character.
 fn single_kana_to_romaji(c: char) -> &'static str {
     match c {
         'あ' => "a",  'い' => "i",  'う' => "u",  'え' => "e",  'お' => "o",
@@ -444,6 +516,49 @@ mod tests {
         let readings: Vec<&str> = hyps.iter().map(|h| h.reading.as_str()).collect();
         let unique: std::collections::HashSet<&str> = readings.iter().copied().collect();
         assert_eq!(readings.len(), unique.len(), "duplicate readings found");
+    }
+
+    #[test]
+    fn test_boundary_transposition() {
+        // "でうsが" — "うs" is a transposed "su" (す).
+        let hyps = generate_hypotheses("でうsが", 100);
+        let readings: Vec<&str> = hyps.iter().map(|h| h.reading.as_str()).collect();
+        assert!(
+            readings.contains(&"ですが"),
+            "should find ですが from でうsが, got: {:?}",
+            readings
+        );
+    }
+
+    #[test]
+    fn test_all_romaji_for_kana_roundtrip() {
+        // Every entry in all_romaji_for_kana must round-trip through
+        // RomajiConverter back to the same kana.
+        for c in "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをんがぎぐげござじずぜぞだぢづでどばびぶべぼぱぴぷぺぽ".chars() {
+            for romaji in all_romaji_for_kana(c) {
+                let kana = validate_romaji_segment(romaji);
+                assert_eq!(
+                    kana.as_deref(),
+                    Some(&*c.to_string()),
+                    "all_romaji_for_kana('{}') contains {:?} which converts to {:?}, not {:?}",
+                    c, romaji, kana, c.to_string()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_boundary_transposition_alt_romaji() {
+        // "かh" — user typed "cah" instead of "cha" (ちゃ).
+        // "ca"→か, "h" PassThrough. Reverse "か"→"ca", combined "cah",
+        // transpose → "cha" → ちゃ.
+        let hyps = generate_hypotheses("かh", 100);
+        let readings: Vec<&str> = hyps.iter().map(|h| h.reading.as_str()).collect();
+        assert!(
+            readings.contains(&"ちゃ"),
+            "should find ちゃ from かh via ca+h→cha, got: {:?}",
+            readings
+        );
     }
 
     #[test]
