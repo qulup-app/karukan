@@ -38,7 +38,5 @@ enabled = true
 max_entries = 10000
 
 [fuzzy_repair]
-# ファジー修復を有効にする (Composing中にショートカットキーでタイプミス修復候補を表示)
+# ファジー修復を有効にする (Space/Down変換時にタイプミス修復候補を自動表示)
 enabled = true
-# 修復発動のショートカットキー
-shortcut = "ctrl+shift+space"

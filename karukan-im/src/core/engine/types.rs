@@ -90,8 +90,6 @@ pub struct EngineConfig {
     pub live_conversion: bool,
     /// Whether fuzzy repair is enabled
     pub fuzzy_repair_enabled: bool,
-    /// Parsed shortcut for fuzzy repair (None if unparseable)
-    pub fuzzy_repair_shortcut: Option<crate::config::settings::ShortcutKey>,
 }
 
 impl EngineConfig {
@@ -113,7 +111,6 @@ impl EngineConfig {
             strategy: settings.conversion.strategy,
             live_conversion: settings.conversion.live_conversion,
             fuzzy_repair_enabled: settings.fuzzy_repair.enabled,
-            fuzzy_repair_shortcut: crate::config::settings::ShortcutKey::parse(&settings.fuzzy_repair.shortcut),
         }
     }
 }
@@ -131,7 +128,6 @@ impl Default for EngineConfig {
             strategy: StrategyMode::default(),
             live_conversion: false,
             fuzzy_repair_enabled: true,
-            fuzzy_repair_shortcut: crate::config::settings::ShortcutKey::parse("ctrl+shift+space"),
         }
     }
 }

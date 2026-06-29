@@ -88,57 +88,6 @@ pub struct LearningSettings {
 pub struct FuzzyRepairSettings {
     /// Whether fuzzy repair is enabled
     pub enabled: bool,
-    /// Shortcut key combination (e.g. "ctrl+shift+space")
-    pub shortcut: String,
-}
-
-/// Parsed shortcut key combination
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShortcutKey {
-    pub ctrl: bool,
-    pub shift: bool,
-    pub alt: bool,
-    pub super_key: bool,
-    /// The base key name, e.g. "space", "r", "a"
-    pub key: String,
-}
-
-impl ShortcutKey {
-    /// Parse a shortcut string like "ctrl+shift+space" into a [`ShortcutKey`].
-    /// Returns `None` if the string is empty or contains no base key.
-    pub fn parse(s: &str) -> Option<Self> {
-        if s.is_empty() {
-            return None;
-        }
-        let parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
-        let mut ctrl = false;
-        let mut shift = false;
-        let mut alt = false;
-        let mut super_key = false;
-        let mut key = String::new();
-
-        for part in &parts {
-            match part.to_lowercase().as_str() {
-                "ctrl" | "control" => ctrl = true,
-                "shift" => shift = true,
-                "alt" => alt = true,
-                "super" | "cmd" | "command" => super_key = true,
-                k => key = k.to_string(),
-            }
-        }
-
-        if key.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            ctrl,
-            shift,
-            alt,
-            super_key,
-            key,
-        })
-    }
 }
 
 impl Default for Settings {
@@ -392,7 +341,6 @@ strategy = "main"
     fn test_fuzzy_repair_defaults() {
         let settings = Settings::default();
         assert!(settings.fuzzy_repair.enabled);
-        assert_eq!(settings.fuzzy_repair.shortcut, "ctrl+shift+space");
     }
 
     #[test]
@@ -408,22 +356,5 @@ enabled = false
         .unwrap();
         let settings = Settings::load_from(&file.path().to_path_buf()).unwrap();
         assert!(!settings.fuzzy_repair.enabled);
-        assert_eq!(settings.fuzzy_repair.shortcut, "ctrl+shift+space");
-    }
-
-    #[test]
-    fn test_shortcut_key_parse() {
-        let sk = ShortcutKey::parse("ctrl+shift+space").unwrap();
-        assert!(sk.ctrl);
-        assert!(sk.shift);
-        assert!(!sk.alt);
-        assert_eq!(sk.key, "space");
-
-        let sk = ShortcutKey::parse("ctrl+r").unwrap();
-        assert!(sk.ctrl);
-        assert!(!sk.shift);
-        assert_eq!(sk.key, "r");
-
-        assert!(ShortcutKey::parse("").is_none());
     }
 }

@@ -186,6 +186,37 @@ impl InputMethodEngine {
 
         let reading = self.input_buf.text.clone();
 
+        // Fuzzy repair: when the buffer contains stranded ASCII (typo signal),
+        // generate corrected reading hypotheses instead of normal conversion.
+        if !skip_learning
+            && self.config.fuzzy_repair_enabled
+            && reading.chars().any(|c| c.is_ascii_alphabetic())
+        {
+            let fuzzy_candidates = self.fuzzy_repair_candidates();
+            if !fuzzy_candidates.is_empty() {
+                self.live.text.clear();
+                self.converters.romaji.reset();
+                self.input_buf.cursor_pos = 0;
+
+                let candidate_list = CandidateList::new(
+                    fuzzy_candidates
+                        .into_iter()
+                        .map(|ac| {
+                            let cand_reading = ac.reading.unwrap_or_else(|| reading.clone());
+                            let label = ac.source.label();
+                            Candidate {
+                                text: ac.text,
+                                reading: Some(cand_reading),
+                                source_label: (!label.is_empty()).then(|| label.to_string()),
+                                description: ac.description,
+                            }
+                        })
+                        .collect(),
+                );
+                return self.enter_conversion_state(&reading, candidate_list);
+            }
+        }
+
         // Save auto-suggest/live conversion result before clearing state.
         // This ensures the candidate that was displayed during input is preserved
         // in the conversion candidate list even if the re-inference uses a different strategy.

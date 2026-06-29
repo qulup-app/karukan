@@ -5,10 +5,9 @@ use super::*;
 impl InputMethodEngine {
     /// Generate fuzzy repair candidates from the current input buffer.
     ///
-    /// Called when the user presses the fuzzy repair shortcut (default: Ctrl+Shift+Space).
-    /// Scans `input_buf.text` for stranded ASCII (typo signals), generates corrected
-    /// reading hypotheses, filters through dictionary lookup, converts via the model,
-    /// and returns candidates sorted by priority.
+    /// Called from `start_conversion` when the buffer contains stranded ASCII.
+    /// Generates corrected reading hypotheses, filters through dictionary lookup,
+    /// converts via the model, and returns candidates sorted by priority.
     ///
     /// Returns empty Vec if no ASCII is found or fuzzy repair is disabled.
     pub(super) fn fuzzy_repair_candidates(&mut self) -> Vec<AnnotatedCandidate> {
@@ -107,49 +106,4 @@ impl InputMethodEngine {
         candidates
     }
 
-    /// Start fuzzy repair conversion: generate repair candidates and enter Conversion state.
-    ///
-    /// Like `start_conversion` but uses fuzzy-repaired readings instead of the raw input.
-    /// Falls back to normal `start_conversion(false)` if no repair candidates are found
-    /// (e.g. buffer has no stranded ASCII).
-    pub(super) fn start_fuzzy_repair(&mut self) -> EngineResult {
-        // Flush any remaining romaji into composed_hiragana
-        self.flush_romaji_to_composed();
-
-        let reading = self.input_buf.text.clone();
-
-        let candidates = self.fuzzy_repair_candidates();
-        if candidates.is_empty() {
-            // No repair possible — fall back to normal conversion
-            return self.start_conversion(false);
-        }
-
-        // Save and clear live conversion state
-        self.live.text.clear();
-        self.converters.romaji.reset();
-        self.input_buf.cursor_pos = 0;
-
-        if reading.is_empty() {
-            return EngineResult::consumed();
-        }
-
-        // Map AnnotatedCandidate → public Candidate
-        let candidate_list = CandidateList::new(
-            candidates
-                .into_iter()
-                .map(|ac| {
-                    let cand_reading = ac.reading.unwrap_or_else(|| reading.clone());
-                    let label = ac.source.label();
-                    Candidate {
-                        text: ac.text,
-                        reading: Some(cand_reading),
-                        source_label: (!label.is_empty()).then(|| label.to_string()),
-                        description: ac.description,
-                    }
-                })
-                .collect(),
-        );
-
-        self.enter_conversion_state(&reading, candidate_list)
-    }
 }
