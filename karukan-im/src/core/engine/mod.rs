@@ -7,6 +7,7 @@ mod chunk;
 mod conversion;
 mod cursor;
 mod display;
+mod fuzzy;
 mod init;
 mod input;
 mod input_buffer;

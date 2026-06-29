@@ -253,7 +253,7 @@ impl InputMethodEngine {
     ///
     /// Sets up the preedit (highlighted selected text), updates the state, and
     /// returns an EngineResult with preedit, candidates, and aux text actions.
-    fn enter_conversion_state(&mut self, reading: &str, candidates: CandidateList) -> EngineResult {
+    pub(super) fn enter_conversion_state(&mut self, reading: &str, candidates: CandidateList) -> EngineResult {
         let selected_text = candidates.selected_text().unwrap_or(reading).to_string();
 
         let preedit = Preedit::from_segments(
@@ -278,7 +278,7 @@ impl InputMethodEngine {
     ///
     /// User dictionary results come first (higher priority), then system dictionary
     /// results sorted by score. Duplicates are removed via HashSet.
-    fn search_dictionaries(&self, reading: &str, limit: usize) -> Vec<AnnotatedCandidate> {
+    pub(super) fn search_dictionaries(&self, reading: &str, limit: usize) -> Vec<AnnotatedCandidate> {
         let mut candidates = Vec::new();
         let mut seen = HashSet::new();
 

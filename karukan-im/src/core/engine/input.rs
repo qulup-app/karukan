@@ -253,6 +253,15 @@ impl InputMethodEngine {
         key: &KeyEvent,
         shift_active: bool,
     ) -> EngineResult {
+        // Configurable fuzzy repair shortcut (checked before Ctrl block so it
+        // takes priority, and disabled state doesn't capture the key)
+        if self.input_mode != InputMode::Alphabet
+            && self.input_mode != InputMode::Emoji
+            && self.matches_fuzzy_shortcut(key)
+        {
+            return self.start_fuzzy_repair();
+        }
+
         // Handle Ctrl+key shortcuts
         if key.modifiers.control_key {
             match key.keysym {
@@ -495,5 +504,40 @@ impl InputMethodEngine {
             result = result.with_action(EngineAction::Commit(literal));
         }
         result
+    }
+
+    /// Check if a key event matches the configured fuzzy repair shortcut.
+    /// Returns false when fuzzy repair is disabled or no shortcut is configured.
+    fn matches_fuzzy_shortcut(&self, key: &KeyEvent) -> bool {
+        if !self.config.fuzzy_repair_enabled {
+            return false;
+        }
+        let Some(ref sk) = self.config.fuzzy_repair_shortcut else {
+            return false;
+        };
+        if key.modifiers.control_key != sk.ctrl {
+            return false;
+        }
+        if key.modifiers.shift_key != sk.shift {
+            return false;
+        }
+        if key.modifiers.alt_key != sk.alt {
+            return false;
+        }
+        if key.modifiers.super_key != sk.super_key {
+            return false;
+        }
+        match sk.key.as_str() {
+            "space" => key.keysym == Keysym::SPACE,
+            k if k.len() == 1 => {
+                // Match against keysym directly (not to_char, which returns
+                // None when Ctrl/Alt are held). Keysym values for ASCII
+                // letters are their byte values (lowercase and uppercase).
+                let b = k.as_bytes()[0];
+                key.keysym == Keysym(b as u32)
+                    || key.keysym == Keysym(b.to_ascii_uppercase() as u32)
+            }
+            _ => false,
+        }
     }
 }

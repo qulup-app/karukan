@@ -298,7 +298,7 @@ impl InputMethodEngine {
     /// chunk the cursor is in, etc.); `run_kana_kanji_conversion` handles a
     /// missing converter by yielding nothing, and each chunk falls back to its
     /// own reading.
-    fn ensure_kanji_converter(&mut self) {
+    pub(super) fn ensure_kanji_converter(&mut self) {
         if self.converters.kanji.is_none()
             && let Err(e) = self.init_kanji_converter()
         {
