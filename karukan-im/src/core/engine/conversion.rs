@@ -246,6 +246,26 @@ impl InputMethodEngine {
             );
         }
 
+        // Kana-level fuzzy repair: when normal candidates suggest the reading
+        // is broken Japanese (no meaningful conversion), try QWERTY-neighbor
+        // substitutions on the reverse-mapped romaji.
+        if !skip_learning && self.config.fuzzy_repair_enabled {
+            let kana_repairs = self.kana_repair_candidates(&candidates);
+            if !kana_repairs.is_empty() {
+                // Prepend kana repair candidates (higher priority than broken normal candidates)
+                let mut merged = kana_repairs;
+                // Keep normal candidates as lower-priority fallback
+                let existing_texts: std::collections::HashSet<String> =
+                    merged.iter().map(|c| c.text.clone()).collect();
+                for c in candidates {
+                    if !existing_texts.contains(&c.text) {
+                        merged.push(c);
+                    }
+                }
+                candidates = merged;
+            }
+        }
+
         if candidates.is_empty() {
             // No candidates, stay in hiragana mode
             let preedit = Preedit::with_text_underlined(&reading);

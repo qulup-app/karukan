@@ -238,6 +238,128 @@ pub fn generate_hypotheses(buffer: &str, max_hypotheses: usize) -> Vec<FuzzyHypo
     hypotheses
 }
 
+// ── Kana-level fuzzy repair ──────────────────────────────────────────────────
+
+/// Map a single hiragana character to its shortest romaji.
+/// Returns an empty string for characters that are not hiragana
+/// (katakana, kanji, symbols, digits, ASCII), which are passed through
+/// unchanged by `reverse_romaji`.
+fn single_kana_to_romaji(c: char) -> &'static str {
+    match c {
+        'あ' => "a",  'い' => "i",  'う' => "u",  'え' => "e",  'お' => "o",
+        'か' => "ka", 'き' => "ki", 'く' => "ku", 'け' => "ke", 'こ' => "ko",
+        'さ' => "sa", 'し' => "si", 'す' => "su", 'せ' => "se", 'そ' => "so",
+        'た' => "ta", 'ち' => "ti", 'つ' => "tu", 'て' => "te", 'と' => "to",
+        'な' => "na", 'に' => "ni", 'ぬ' => "nu", 'ね' => "ne", 'の' => "no",
+        'は' => "ha", 'ひ' => "hi", 'ふ' => "hu", 'へ' => "he", 'ほ' => "ho",
+        'ま' => "ma", 'み' => "mi", 'む' => "mu", 'め' => "me", 'も' => "mo",
+        'や' => "ya", 'ゆ' => "yu", 'よ' => "yo",
+        'ら' => "ra", 'り' => "ri", 'る' => "ru", 'れ' => "re", 'ろ' => "ro",
+        'わ' => "wa", 'を' => "wo", 'ん' => "nn",
+        'が' => "ga", 'ぎ' => "gi", 'ぐ' => "gu", 'げ' => "ge", 'ご' => "go",
+        'ざ' => "za", 'じ' => "zi", 'ず' => "zu", 'ぜ' => "ze", 'ぞ' => "zo",
+        'だ' => "da", 'ぢ' => "di", 'づ' => "du", 'で' => "de", 'ど' => "do",
+        'ば' => "ba", 'び' => "bi", 'ぶ' => "bu", 'べ' => "be", 'ぼ' => "bo",
+        'ぱ' => "pa", 'ぴ' => "pi", 'ぷ' => "pu", 'ぺ' => "pe", 'ぽ' => "po",
+        'っ' => "xtu",
+        'ゃ' => "xya", 'ゅ' => "xyu", 'ょ' => "xyo",
+        'ぁ' => "xa",  'ぃ' => "xi",  'ぅ' => "xu",  'ぇ' => "xe",  'ぉ' => "xo",
+        _ => "",
+    }
+}
+
+/// Map a combo kana pair (拗音: consonant kana + small ゃ/ゅ/ょ) to romaji.
+/// Returns `None` if the pair is not a recognised combo.
+fn combo_kana_to_romaji(first: char, second: char) -> Option<&'static str> {
+    match (first, second) {
+        ('き', 'ゃ') => Some("kya"), ('き', 'ゅ') => Some("kyu"), ('き', 'ょ') => Some("kyo"),
+        ('し', 'ゃ') => Some("sya"), ('し', 'ゅ') => Some("syu"), ('し', 'ょ') => Some("syo"),
+        ('ち', 'ゃ') => Some("tya"), ('ち', 'ゅ') => Some("tyu"), ('ち', 'ょ') => Some("tyo"),
+        ('に', 'ゃ') => Some("nya"), ('に', 'ゅ') => Some("nyu"), ('に', 'ょ') => Some("nyo"),
+        ('ひ', 'ゃ') => Some("hya"), ('ひ', 'ゅ') => Some("hyu"), ('ひ', 'ょ') => Some("hyo"),
+        ('み', 'ゃ') => Some("mya"), ('み', 'ゅ') => Some("myu"), ('み', 'ょ') => Some("myo"),
+        ('り', 'ゃ') => Some("rya"), ('り', 'ゅ') => Some("ryu"), ('り', 'ょ') => Some("ryo"),
+        ('ぎ', 'ゃ') => Some("gya"), ('ぎ', 'ゅ') => Some("gyu"), ('ぎ', 'ょ') => Some("gyo"),
+        ('じ', 'ゃ') => Some("zya"), ('じ', 'ゅ') => Some("zyu"), ('じ', 'ょ') => Some("zyo"),
+        ('び', 'ゃ') => Some("bya"), ('び', 'ゅ') => Some("byu"), ('び', 'ょ') => Some("byo"),
+        ('ぴ', 'ゃ') => Some("pya"), ('ぴ', 'ゅ') => Some("pyu"), ('ぴ', 'ょ') => Some("pyo"),
+        _ => None,
+    }
+}
+
+/// Convert a hiragana string back to the shortest common romaji representation.
+///
+/// - Combo kana (拗音) are recognised by lookahead at the next character being
+///   small ゃ/ゅ/ょ; they consume two characters and emit a single romaji cluster.
+/// - Non-hiragana characters (katakana, kanji, ASCII, digits, symbols) are
+///   passed through unchanged.
+pub fn reverse_romaji(reading: &str) -> String {
+    let chars: Vec<char> = reading.chars().collect();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        // Attempt combo (拗音) first: current + next is ゃ/ゅ/ょ
+        if i + 1 < chars.len() {
+            let next = chars[i + 1];
+            if matches!(next, 'ゃ' | 'ゅ' | 'ょ') {
+                if let Some(romaji) = combo_kana_to_romaji(chars[i], next) {
+                    result.push_str(romaji);
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        // Single kana → romaji (or pass through if not hiragana)
+        let romaji = single_kana_to_romaji(chars[i]);
+        if romaji.is_empty() {
+            result.push(chars[i]);
+        } else {
+            result.push_str(romaji);
+        }
+        i += 1;
+    }
+    result
+}
+
+/// Generate alternative kana readings by applying single QWERTY-key substitutions
+/// to the reverse-mapped romaji of `reading`, then re-converting through
+/// `RomajiConverter`.
+///
+/// This handles the case where romaji conversion succeeded but produced the wrong
+/// kana (e.g. user typed "warashi" → "わらし" instead of "わたし").  There is no
+/// stranded ASCII to signal the error; the kana is valid but wrong.
+///
+/// Only `EditType::Substitution` is attempted here — insertion/deletion/transposition
+/// are already handled by `generate_hypotheses` for the PassThrough (stranded ASCII) case.
+pub fn generate_kana_hypotheses(reading: &str, max_hypotheses: usize) -> Vec<FuzzyHypothesis> {
+    let romaji = reverse_romaji(reading);
+    let romaji_chars: Vec<char> = romaji.chars().collect();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut hypotheses: Vec<FuzzyHypothesis> = Vec::new();
+
+    'outer: for pos in 0..romaji_chars.len() {
+        let c = romaji_chars[pos];
+        for &neighbor in qwerty_neighbors(c) {
+            let mut candidate = romaji_chars.clone();
+            candidate[pos] = neighbor;
+            let candidate_str: String = candidate.iter().collect();
+            if let Some(kana) = validate_romaji_segment(&candidate_str) {
+                if kana != reading && seen.insert(kana.clone()) {
+                    hypotheses.push(FuzzyHypothesis {
+                        reading: kana,
+                        edit_type: EditType::Substitution,
+                    });
+                    if hypotheses.len() >= max_hypotheses {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+
+    hypotheses
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +457,76 @@ mod tests {
                 "hypothesis {:?} contains residual ASCII",
                 h.reading
             );
+        }
+    }
+
+    // ── reverse_romaji ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reverse_romaji_basic() {
+        assert_eq!(reverse_romaji("わたし"), "watasi");
+        // ん→nn, じ→zi
+        assert_eq!(reverse_romaji("かんじ"), "kannzi");
+        // きょ (combo) → kyo, う→u
+        assert_eq!(reverse_romaji("きょう"), "kyou");
+    }
+
+    #[test]
+    fn test_reverse_romaji_combo() {
+        assert_eq!(reverse_romaji("しゃしん"), "syasinn");
+        assert_eq!(reverse_romaji("にゃ"), "nya");
+        assert_eq!(reverse_romaji("りょ"), "ryo");
+    }
+
+    #[test]
+    fn test_reverse_romaji_non_hiragana_passthrough() {
+        // Pure ASCII passes through unchanged
+        assert_eq!(reverse_romaji("abc"), "abc");
+        // Mixed: hiragana converted, digits/ASCII pass through
+        assert_eq!(reverse_romaji("わ123"), "wa123");
+    }
+
+    #[test]
+    fn test_reverse_romaji_small_kana() {
+        // っ → xtu (standalone)
+        assert_eq!(reverse_romaji("っ"), "xtu");
+        // Small ゃ outside combo → xya
+        assert_eq!(reverse_romaji("ゃ"), "xya");
+    }
+
+    // ── generate_kana_hypotheses ──────────────────────────────────────────────
+
+    #[test]
+    fn test_generate_kana_hypotheses_substitution() {
+        // わらし → reverse "warasi" → substitute r→t at pos 2 → "watasi" → わたし
+        let hyps = generate_kana_hypotheses("わらし", 100);
+        let readings: Vec<&str> = hyps.iter().map(|h| h.reading.as_str()).collect();
+        assert!(readings.contains(&"わたし"), "should find わたし from わらし, got: {:?}", readings);
+    }
+
+    #[test]
+    fn test_generate_kana_hypotheses_no_self() {
+        // The original reading must not appear in the hypotheses
+        let hyps = generate_kana_hypotheses("わたし", 100);
+        let readings: Vec<&str> = hyps.iter().map(|h| h.reading.as_str()).collect();
+        assert!(!readings.contains(&"わたし"), "should not contain the original reading");
+    }
+
+    #[test]
+    fn test_generate_kana_hypotheses_dedup() {
+        // Each reading should appear at most once
+        let hyps = generate_kana_hypotheses("わたし", 100);
+        let readings: Vec<&str> = hyps.iter().map(|h| h.reading.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = readings.iter().copied().collect();
+        assert_eq!(readings.len(), unique.len(), "duplicate readings in kana hypotheses");
+    }
+
+    #[test]
+    fn test_generate_kana_hypotheses_edit_type() {
+        // All hypotheses must carry EditType::Substitution
+        let hyps = generate_kana_hypotheses("わらし", 100);
+        for h in &hyps {
+            assert_eq!(h.edit_type, EditType::Substitution);
         }
     }
 }

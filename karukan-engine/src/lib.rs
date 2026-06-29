@@ -16,4 +16,4 @@ pub use rewriter::{
     AlphabetRewriter, EmojiRewriter, HalfWidthKatakanaRewriter, RewriteOutput, Rewriter,
     RewriterChain, SymbolRewriter, description as symbol_description,
 };
-pub use romaji::{BackspaceResult, ConversionEvent, RomajiConverter, fuzzy::{EditType, FuzzyHypothesis, generate_hypotheses}};
+pub use romaji::{BackspaceResult, ConversionEvent, RomajiConverter, fuzzy::{EditType, FuzzyHypothesis, generate_hypotheses, generate_kana_hypotheses, reverse_romaji}};
