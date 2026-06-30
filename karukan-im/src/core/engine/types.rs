@@ -225,6 +225,14 @@ pub(in crate::core) enum ConversionStrategy {
     MainModelBeam { beam_width: usize },
 }
 
+/// One segment in a multi-segment conversion.
+/// The user navigates between segments with Left/Right and resizes them with Shift+Left/Shift+Right.
+#[derive(Debug, Clone)]
+pub(in crate::core) struct ConversionSegment {
+    pub reading: String,
+    pub candidates: CandidateList,
+}
+
 /// Timing and adaptive model selection metrics for conversion
 #[derive(Debug, Clone, Default)]
 pub(in crate::core) struct ConversionMetrics {
