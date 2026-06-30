@@ -554,12 +554,18 @@ impl InputMethodEngine {
             }
         }
 
-        // Prefix match (predictive)
+        // Prefix match (predictive) — skip entries whose reading is much
+        // longer than the current input to avoid surfacing long sentences
+        // when the user is only typing a few characters.
+        let max_reading_len = reading.chars().count() * 2;
         for (full_reading, surface, _score) in cache.prefix_lookup(reading) {
             if candidates.len() >= MAX_LEARNING_CANDIDATES {
                 break;
             }
             if full_reading == reading {
+                continue;
+            }
+            if full_reading.chars().count() > max_reading_len {
                 continue;
             }
             if seen.insert(surface.clone()) {
