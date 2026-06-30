@@ -150,6 +150,11 @@ pub struct InputMethodEngine {
     /// a keystroke only reconverts the chunk it touched, not the whole buffer.
     /// Empty when not composing.
     chunks: Vec<ComposingChunk>,
+    /// Conversion segments (valid only in Conversion state). Populated by
+    /// `enter_conversion_state`, cleared on commit/cancel/reset.
+    segments: Vec<ConversionSegment>,
+    /// Index of the currently focused segment.
+    current_segment: usize,
     /// Dictionaries (system, user)
     dicts: Dictionaries,
     /// Learning cache (user conversion history)
@@ -175,6 +180,8 @@ impl InputMethodEngine {
             input_buf: InputBuffer::new(),
             live: LiveConversion::default(),
             chunks: Vec::new(),
+            segments: Vec::new(),
+            current_segment: 0,
             dicts: Dictionaries::default(),
             learning: None,
         }
@@ -248,6 +255,8 @@ impl InputMethodEngine {
         self.input_buf.clear();
         self.live.text.clear();
         self.chunks.clear();
+        self.segments.clear();
+        self.current_segment = 0;
         self.metrics = ConversionMetrics::default();
     }
 
@@ -513,16 +522,14 @@ impl InputMethodEngine {
                 self.surrounding_context = None;
                 text
             }
-            InputState::Conversion { candidates, .. } => {
-                let text = candidates.selected_text().unwrap_or("").to_string();
-                let reading = candidates.selected().and_then(|c| c.reading.clone());
-                // Record conversion result in learning cache
-                if let Some(reading) = &reading {
-                    self.record_learning(reading, &text);
-                }
+            InputState::Conversion { .. } => {
+                // Use drain_segments() so all segments (including those created by
+                // Shift+Left/Right) are committed and learning is recorded for each one.
+                let text = self.drain_segments();
                 self.input_buf.clear();
                 self.state = InputState::Empty;
                 self.surrounding_context = None;
+                self.exit_emoji_mode();
                 text
             }
         }

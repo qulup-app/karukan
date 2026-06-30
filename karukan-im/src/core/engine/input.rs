@@ -146,6 +146,11 @@ impl InputMethodEngine {
         // The full-width space gesture from Empty in any mode is
         // `Ctrl+Space` (above), which seeds a Composing session.
         if key.keysym == Keysym::SPACE && !key.modifiers.control_key && !key.modifiers.alt_key {
+            // Shift+Space → half-width space regardless of mode
+            if shift_active {
+                return EngineResult::consumed()
+                    .with_action(EngineAction::Commit(" ".to_string()));
+            }
             return if self.input_mode == InputMode::Hiragana {
                 EngineResult::consumed().with_action(EngineAction::Commit("\u{3000}".to_string()))
             } else {
