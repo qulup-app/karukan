@@ -10,6 +10,7 @@ import InputMethodKit
 @objc(KarukanInputController)
 class KarukanInputController: IMKInputController {
     static let candidateWindow = CandidateWindowController()
+    private static let noReplacementRange = NSRange(location: NSNotFound, length: NSNotFound)
 
     /// Mirrors whether the engine currently shows a preedit (updated from
     /// engine actions). Used to decide when to refresh surrounding text.
@@ -74,12 +75,16 @@ class KarukanInputController: IMKInputController {
 
     override func deactivateServer(_ sender: Any!) {
         // Mozc-style: commit the pending preedit on focus loss, then
-        // persist what the user taught us.
+        // close this input context before the next app receives key events.
         if let client = sender as? (any IMKTextInput) {
             flushComposition(client: client)
         } else {
             Self.candidateWindow.hide()
         }
+        hasPreedit = false
+        Self.candidateWindow.hide()
+        engineClient.resetAsync()
+        engineClient.setSurroundingTextAsync(text: "", cursorPos: 0)
         engineClient.saveLearningAsync()
         super.deactivateServer(sender)
     }
@@ -130,7 +135,7 @@ class KarukanInputController: IMKInputController {
         for action in actions {
             switch action {
             case .commit(let text):
-                client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+                client.insertText(text, replacementRange: Self.noReplacementRange)
 
             case .updatePreedit(let text, let caret, let attributes):
                 hasPreedit = !text.isEmpty
@@ -214,7 +219,7 @@ class KarukanInputController: IMKInputController {
             client.setMarkedText(
                 NSAttributedString(string: ""),
                 selectionRange: NSRange(location: 0, length: 0),
-                replacementRange: NSRange(location: NSNotFound, length: 0)
+                replacementRange: Self.noReplacementRange
             )
             return
         }
@@ -242,7 +247,7 @@ class KarukanInputController: IMKInputController {
         client.setMarkedText(
             attributed,
             selectionRange: NSRange(location: caretUTF16, length: 0),
-            replacementRange: NSRange(location: NSNotFound, length: 0)
+            replacementRange: Self.noReplacementRange
         )
     }
 }
