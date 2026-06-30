@@ -58,6 +58,10 @@ class EngineClient {
         keyResultSync(method: "commit", params: [:], timeout: 1.0)
     }
 
+    func resetAsync() {
+        sendRequest(method: "reset", params: [:]) { _ in }
+    }
+
     func saveLearningAsync() {
         sendRequest(method: "save_learning", params: [:]) { _ in }
     }
